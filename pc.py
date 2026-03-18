@@ -13,6 +13,8 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+INKSCAPE_LABEL = "{http://www.inkscape.org/namespaces/inkscape}label"
+
 
 class ColorFormatter(logging.Formatter):
     """Formatter that adds ANSI color codes to log messages."""
@@ -162,19 +164,12 @@ def pdf_to_svg(pdf_path: Path) -> Path | None:
     tmpdir = tempfile.mkdtemp()
     svg_file = Path(tmpdir) / "out.svg"
     result = subprocess.run(
-        [
-            "inkscape",
-            "--pdf-poppler",
-            str(pdf_path),
-            "--export-type=svg",
-            "--export-filename",
-            str(svg_file),
-        ],
+        ["pdf2svg", str(pdf_path), str(svg_file)],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        logger.error(f"Inkscape PDF conversion failed for {pdf_path}\n{result.stderr}")
+        logger.error(f"pdf2svg failed for {pdf_path}\n{result.stderr}")
         return None
     return svg_file
 
@@ -288,6 +283,7 @@ def _compile_one(panel_config: dict, config_path: Path, output_path: Path) -> No
     namespaces = {
         "svg": "http://www.w3.org/2000/svg",
         "xlink": "http://www.w3.org/1999/xlink",
+        "inkscape": "http://www.inkscape.org/namespaces/inkscape",
     }
     for prefix, uri in namespaces.items():
         ET.register_namespace(prefix, uri)
@@ -296,7 +292,11 @@ def _compile_one(panel_config: dict, config_path: Path, output_path: Path) -> No
     for figure_id, figure_config in panel_config.items():
         if figure_id in RESERVED_KEYS:
             continue
-        group = root.find(f".//*[@id='{figure_id}']")
+        group = (
+            root.find(f".//*[@{INKSCAPE_LABEL}='{figure_id}']")
+            or root.find(f".//*[@label='{figure_id}']")
+            or root.find(f".//*[@id='{figure_id}']")
+        )
         if group is None:
             logger.warning(f"Group {figure_id} not found in panel")
             continue
@@ -445,7 +445,9 @@ def compile_panel(config_path: Path, fallback_output: Path) -> None:
             _compile_one(item, config_path, config_path.parent / item_output)
     else:
         yaml_output = config.get("output")
-        output_path = config_path.parent / yaml_output if yaml_output else fallback_output
+        output_path = (
+            config_path.parent / yaml_output if yaml_output else fallback_output
+        )
         _compile_one(config, config_path, output_path)
 
 
