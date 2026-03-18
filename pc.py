@@ -153,21 +153,9 @@ def load_svg_content(svg_path: Path) -> list[ET.Element]:
     return [copy.deepcopy(element) for element in tree.getroot()]
 
 
-def render_latex_to_svg(latex_text: str, fontsize: str = "10pt") -> list[ET.Element]:
+def render_latex_to_svg(latex_text: str) -> list[ET.Element]:
     """Render LaTeX text to SVG using pdflatex and pdf2svg."""
     try:
-        # Parse font size (e.g., "10pt" -> 10)
-        try:
-            if fontsize.endswith("pt"):
-                fontsize_val = fontsize[:-2]
-            else:
-                fontsize_val = fontsize
-        except ValueError:
-            logger.error(
-                f"Invalid font size format '{fontsize}'. Use format like '10pt' or '10'"
-            )
-            return []
-
         # Create temporary directory for LaTeX compilation
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -250,16 +238,20 @@ def render_latex_to_svg(latex_text: str, fontsize: str = "10pt") -> list[ET.Elem
         return []
 
 
-def compile_panel(
-    panel_path: Path,
-    config_path: Path,
-    output_path: Path,
-) -> None:
-    """Compile panel by substituting figures from config."""
+RESERVED_KEYS = {"panel", "output"}
 
-    # Load config
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
+
+def _compile_one(panel_config: dict, config_path: Path, output_path: Path) -> None:
+    """Compile a single panel from a config dict."""
+    panel_str = panel_config.get("panel")
+    if not panel_str:
+        logger.error("Config missing required 'panel' key")
+        return
+    panel_path = config_path.parent / panel_str
+
+    if not panel_path.exists():
+        logger.error(f"Panel file not found: {panel_path}")
+        return
 
     # Parse panel SVG
     tree = ET.parse(panel_path)
@@ -274,7 +266,9 @@ def compile_panel(
         ET.register_namespace(prefix, uri)
 
     # Process each figure in config
-    for figure_id, figure_config in config.items():
+    for figure_id, figure_config in panel_config.items():
+        if figure_id in RESERVED_KEYS:
+            continue
         group = root.find(f".//*[@id='{figure_id}']")
         if group is None:
             logger.warning(f"Group {figure_id} not found in panel")
@@ -307,14 +301,14 @@ def compile_panel(
 
         # Use LaTeX if specified, otherwise require SVG file
         if tex_text:
-            content = render_latex_to_svg(tex_text, fontsize)
+            content = render_latex_to_svg(tex_text)
             if not content:
                 logger.warning(f"Failed to render LaTeX for {figure_id}")
                 continue
             # Scale LaTeX based on fontsize (12pt is base)
             scale = fontsize_num / 12.0
         elif svg_file:
-            svg_path = panel_path.parent / svg_file
+            svg_path = config_path.parent / svg_file
             if not svg_path.exists():
                 logger.warning(f"SVG file not found: {svg_path}")
                 continue
@@ -368,6 +362,22 @@ def compile_panel(
     logger.info(f"Panel compiled to {output_path}")
 
 
+def compile_panel(config_path: Path, output_path: Path) -> None:
+    """Compile one or more panels from a config file."""
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    if isinstance(config, list):
+        for item in config:
+            item_output = item.get("output")
+            if not item_output:
+                logger.error("Each panel block must have an 'output' key")
+                continue
+            _compile_one(item, config_path, config_path.parent / item_output)
+    else:
+        _compile_one(config, config_path, output_path)
+
+
 def main() -> None:
     """CLI entry point."""
     handler = logging.StreamHandler()
@@ -378,34 +388,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compile SVG figures into a panel template"
     )
-    parser.add_argument("panel", help="Input panel SVG file")
+    default_config = Path(__file__).stem + ".yaml"
     parser.add_argument(
         "config",
         nargs="?",
-        default="pc.yaml",
-        help="Configuration YAML file (defaults to pc.yaml in current directory)",
+        default=default_config,
+        help=f"Configuration YAML file (defaults to {default_config})",
     )
     parser.add_argument(
-        "output",
-        nargs="?",
-        help="Output SVG file (defaults to overwriting input panel)",
+        "-o",
+        "--output",
+        default="out.svg",
+        help="Output SVG file (defaults to out.svg)",
     )
 
     args = parser.parse_args()
 
-    panel_path = Path(args.panel)
     config_path = Path(args.config)
-    output_path = Path(args.output) if args.output else panel_path
-
-    if not panel_path.exists():
-        logger.error(f"Panel file not found: {panel_path}")
-        return
+    output_path = Path(args.output)
 
     if not config_path.exists():
         logger.error(f"Config file not found: {config_path}")
         return
 
-    compile_panel(panel_path, config_path, output_path)
+    compile_panel(config_path, output_path)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
 # Test configuration for panel compiler
+panel: panel.svg
+
 sinus:
   file: sinus.svg
   fit: contain
