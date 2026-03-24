@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from importlib.metadata import version
 from pathlib import Path
 
 import yaml
@@ -507,6 +508,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description="Compile SVG figures into a panel template"
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {version('panel-compiler')}"
     )
     default_config = Path(__file__).stem + ".yaml"
     parser.add_argument(
