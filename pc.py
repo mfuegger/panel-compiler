@@ -37,29 +37,8 @@ class ColorFormatter(logging.Formatter):
         return super().format(record)
 
 
-_UNIT_TO_MM: dict[str, float] = {
-    "mm": 1.0,
-    "cm": 10.0,
-    "in": 25.4,
-    "pt": 25.4 / 72,
-    "pc": 25.4 / 6,
-    "px": 25.4 / 96,
-}
-
-
-def _parse_length_mm(value: str) -> float | None:
-    """Parse an SVG length string to mm.  Returns None if unit is unknown."""
-    import re
-    m = re.fullmatch(r"([\d.]+)\s*([a-z]*)", value.strip())
-    if not m:
-        return None
-    num, unit = float(m.group(1)), m.group(2) or "px"
-    factor = _UNIT_TO_MM.get(unit)
-    return num * factor if factor is not None else None
-
-
 class SVGDimensions:
-    """SVG dimensions in mm, extracted from viewBox or width/height."""
+    """SVG dimensions in source user units, for computing scale transforms."""
 
     def __init__(self, width: float, height: float) -> None:
         self.width = width
@@ -67,36 +46,32 @@ class SVGDimensions:
 
     @classmethod
     def from_svg(cls, svg_path: Path) -> "SVGDimensions":
-        """Extract dimensions from SVG file, converting to mm."""
+        """Return the source user-unit extent of an SVG (viewBox dimensions).
+
+        The scale transform ``scale(s)`` multiplies element coordinates by ``s``
+        in the *target* SVG's user-unit space.  Physical units (pt, mm, …) on the
+        ``width``/``height`` attributes are irrelevant for that ratio — only the
+        viewBox extent, which matches element coordinate ranges, matters.
+        """
         tree = ET.parse(svg_path)
         root = tree.getroot()
 
-        width_attr = root.get("width")
-        height_attr = root.get("height")
-
-        # Determine mm-per-user-unit from width/height attributes if present
         viewbox = root.get("viewBox")
-        if viewbox and width_attr and height_attr:
-            parts = viewbox.split()
-            vb_w, vb_h = float(parts[2]), float(parts[3])
-            w_mm = _parse_length_mm(width_attr)
-            h_mm = _parse_length_mm(height_attr)
-            if w_mm is not None and h_mm is not None and vb_w > 0 and vb_h > 0:
-                # Use width-derived scale (width and height should agree)
-                mm_per_unit = w_mm / vb_w
-                return cls(width=vb_w * mm_per_unit, height=vb_h * mm_per_unit)
-
-        # viewBox without unit context: assume user units are already mm
         if viewbox:
             parts = viewbox.split()
             return cls(width=float(parts[2]), height=float(parts[3]))
 
-        # Fall back to width/height attributes
+        # No viewBox: unitless width/height are the user units.
+        width_attr = root.get("width")
+        height_attr = root.get("height")
         if width_attr and height_attr:
-            w_mm = _parse_length_mm(width_attr)
-            h_mm = _parse_length_mm(height_attr)
-            if w_mm is not None and h_mm is not None:
-                return cls(width=w_mm, height=h_mm)
+            try:
+                return cls(width=float(width_attr), height=float(height_attr))
+            except ValueError:
+                raise ValueError(
+                    f"Cannot determine user-unit dimensions for {svg_path}: "
+                    "no viewBox and physical-unit width/height are ambiguous"
+                )
 
         raise ValueError(f"Cannot determine dimensions for {svg_path}")
 
@@ -342,17 +317,49 @@ def render_latex_to_svg(latex_text: str) -> list[ET.Element]:
 RESERVED_KEYS = {"panel", "output"}
 
 
+def _write_output(tree: "ET.ElementTree[ET.Element]", output_path: Path) -> None:
+    """Write a compiled SVG tree to an SVG or PDF output path."""
+    if output_path.suffix.lower() == ".pdf":
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svg_tmp = Path(tmpdir) / "out.svg"
+            tree.write(svg_tmp, encoding="utf-8", xml_declaration=True)
+            result = subprocess.run(
+                [
+                    "inkscape",
+                    str(svg_tmp),
+                    "--export-type=pdf",
+                    "--export-filename",
+                    str(output_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.error(f"Inkscape PDF export failed\n{result.stderr}")
+                return
+    else:
+        tree.write(output_path, encoding="utf-8", xml_declaration=True)
+    logger.info(f"Panel compiled to {output_path}")
+
+
 def _compile_one(panel_config: dict, config_path: Path, output_path: Path) -> None:
-    """Compile a single panel from a config dict."""
+    """Compile a single panel from a config dict and write to one output path."""
+    tree = _compile_tree(panel_config, config_path)
+    if tree is not None:
+        _write_output(tree, output_path)
+
+
+def _compile_tree(panel_config: dict, config_path: Path) -> "ET.ElementTree[ET.Element] | None":
+    """Parse the template SVG, embed all figures, and return the compiled tree."""
     panel_str = panel_config.get("panel")
     if not panel_str:
         logger.error("Config missing required 'panel' key")
-        return
+        return None
     panel_path = config_path.parent / panel_str
 
     if not panel_path.exists():
         logger.error(f"Panel file not found: {panel_path}")
-        return
+        return None
 
     # Parse panel SVG
     tree = ET.parse(panel_path)
@@ -487,28 +494,7 @@ def _compile_one(panel_config: dict, config_path: Path, output_path: Path) -> No
 
             group.append(element)
 
-    # Write output
-    if output_path.suffix.lower() == ".pdf":
-        with tempfile.TemporaryDirectory() as tmpdir:
-            svg_tmp = Path(tmpdir) / "out.svg"
-            tree.write(svg_tmp, encoding="utf-8", xml_declaration=True)
-            result = subprocess.run(
-                [
-                    "inkscape",
-                    str(svg_tmp),
-                    "--export-type=pdf",
-                    "--export-filename",
-                    str(output_path),
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                logger.error(f"Inkscape PDF export failed\n{result.stderr}")
-                return
-    else:
-        tree.write(output_path, encoding="utf-8", xml_declaration=True)
-    logger.info(f"Panel compiled to {output_path}")
+    return tree
 
 
 def compile_panel(config_path: Path, fallback_output: Path) -> None:
@@ -528,11 +514,17 @@ def compile_panel(config_path: Path, fallback_output: Path) -> None:
             if not raw:
                 logger.error("Each panel block must have an 'output' key")
                 continue
-            for output_path in _resolve_outputs(raw, fallback_output):
-                _compile_one(item, config_path, output_path)
+            outputs = _resolve_outputs(raw, fallback_output)
+            tree = _compile_tree(item, config_path)
+            if tree is not None:
+                for output_path in outputs:
+                    _write_output(tree, output_path)
     else:
-        for output_path in _resolve_outputs(config.get("output"), fallback_output):
-            _compile_one(config, config_path, output_path)
+        outputs = _resolve_outputs(config.get("output"), fallback_output)
+        tree = _compile_tree(config, config_path)
+        if tree is not None:
+            for output_path in outputs:
+                _write_output(tree, output_path)
 
 
 def main() -> None:
